@@ -259,3 +259,211 @@ def sysctl():
         key, value = line.split(":", 1)
         ret[key.strip()] = value.strip()
     return ret
+
+
+def halt(name):
+    """
+    halt jail for upgrade.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' jail.halt <name>
+    """
+    if __salt__["jail.status"](name) is True:
+        __salt__["jail.stop"](name)
+        return True
+    else:
+        return False
+
+
+def zfs_create(jailloc):
+    """
+    Create jail location with zfs.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' jail.zfs_create <jailloc>
+    """
+    if __salt__["zfs.exists"](jailloc) is False:
+        __salt__["zfs.create"](jailloc)
+        return False
+    else:
+        return True
+
+
+def chflags(jailloc):
+    """
+    chflags for jail file upgrade
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' jail.chflags <jailloc>
+    """
+    switch = ""
+    loclist = [
+        "var/empty",
+        "lib",
+        "bin",
+        "sbin",
+        "usr/bin",
+        "usr/lib",
+        "usr/lib32",
+        "usr/libexec",
+        "usr/sbin",
+        "libexec",
+    ]
+    for data in loclist:
+        data = "{0}/{1}".format(jailloc, data)
+        if __salt__["file.directory_exists"](data) is True:
+            filelist = __salt__["file.readdir"](data)
+            for files in filelist:
+                truepath = '{0}/{1}'.format(data, files)
+                __salt__["chflags.change"](switch, "noschg", truepath)
+                return True
+    return True
+
+
+def etc_resolve(name):
+    """
+    jail base upgrade
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' jail.etc_resolve <name>
+    """
+    __salt__["cmd.run"]("jexec {0} etcupdate".format(name))
+    __salt__["cmd.run"]("jexec {0} etcupdate resolve".format(name))
+
+
+def base_upgrade(jail_files, version, jailloc, name):
+    """
+    jail base upgrade
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' jail.base_upgrade <jail_files> <version> <jailloc> <name>
+    """
+    if __salt__['file.file_exists']('{0}/bin/freebsd-version'.format(jailloc)) is False:
+        if __salt__['archive.tar']('xzf', '{0}/{1}/base.txz'.format(jail_files, str(version)), dest=jailloc) is True:
+            return True
+        else:
+            return True
+    else:
+        if __salt__['archive.tar']('xzf', '{0}/{1}/base.txz'.format(jail_files, str(version)), dest=jailloc, exclude="etc") is True:
+            __salt__["jail.etc_resolve"](name)
+            return True
+        else:
+            return True
+
+
+def lib32_upgrade(jail_files, version, jailloc):
+    """
+    jail lib32 upgrade
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' jail.lib32_upgrade <jail_files> <version> <jail_loc>
+    """
+    if __salt__["archive.tar"]("xzf", "{0}/{1}/lib32.txz".format(jail_files, str(version)), dest=jailloc) is True:
+        return True
+    else:
+        return False
+
+
+def src_upgrade(jail_files, version, jailloc, name):
+    """
+    upgrade jail sources.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' jail.src_update <jail_files> <version> <jail_loc> <name>
+    """
+    if __salt__["archive.tar"]("xzf", "{0}/{1}/src.txz".format(jail_files, str(version)), dest="{0}/{1}/src".format(jail_files, str(version))) is True:
+        __salt__["cmd.run"]("mount -t nullfs {0}{1}/src/usr/src {2}/usr/src".format(jail_files, str(version), jailloc))
+        __salt__['cmd.run']('yes | jexec {0} make -c /usr/src delete-old'.format(name))
+        __salt__['cmd.run']('yes | jexec {0} make -c /usr/src delete-old-libs'.format(name))
+        __salt__["mount.umount"]("{0}/usr/src".format(jailloc))
+        return True
+    else:
+        return False
+
+
+def clone(jailloc, name, version=False):
+    """
+    jail snapshot
+
+    version is optional var
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' jail.clone <jailloc> <version>
+    """
+    if version is False:
+        jailversion = __salt__["grains.get"]('jail:jail_{0}_installed'.format(name))
+        __salt__['zfs.clone']("{0}'@'{1} {0}".format(jailloc, jailversion))
+    else:
+        __salt__['zfs.clone']("{0}'@'{1} {0}".format(jailloc, version))
+    return True
+
+
+def manage(jail_files, version, jailloc, name, snapshot, lib32, src, pass_opt):
+    """
+    manage jail release
+
+    snapshot, lib32, src are true/false
+
+    jail_files is location of jail files
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' jail.upgrade <jail_files> <version> <jailloc> <name> <snapshot> <lib32> <src>
+    """
+    jailversion = __salt__["grains.get"]('jail:jail_{0}_installed'.format(name))
+
+    if jailversion != version and pass_opt is False:
+
+        __salt__["jail.zfs_create"](jailloc)
+
+        __salt__["jail.halt"](name)
+
+        if snapshot is True:
+            __salt__['jail.clone'](jailloc, name)
+
+        __salt__["jail.chflags"](jailloc)
+
+        if __salt__["jail.base_upgrade"](jail_files, version, jailloc, name) is True:
+
+            if lib32 is True:
+                __salt__["jail.lib32_upgrade"](jail_files, version, jailloc)
+
+            if __salt__["jail.start"](name) is True:
+
+                if src is True:
+                    __salt__["jail.src_upgrade"](jail_files, version, jailloc, name)
+                else:
+                    __salt__["grains.set"]('jail:jail_{0}_installed'.format(name), val=version)
+                    __salt__["saltutil.refresh_grains"]
+                return True
+            else:
+                return True
+            return True
+        else:
+            return True
